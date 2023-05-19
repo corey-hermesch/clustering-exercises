@@ -49,29 +49,27 @@ def get_csv_export_url(g_sheet_url):
     return csv_url
 
 # defining a function to get zillow data from either a cached csv or the Codeup MySQL server
-# this function is specific to zillow, in particular because of the '%2017%' required in the 
-# sql query
 def get_zillow_data(sql_query= """
-        SELECT *
-        FROM (
-                SELECT temp.parcelid as parcelid, p.logerror as logerror, temp.transactiondate as transactiondate
-                FROM (
-                    SELECT parcelid, MAX(transactiondate) as transactiondate
-                    FROM predictions_2017
-                    WHERE transactiondate LIKE %s
-                    GROUP BY parcelid
-                    ORDER BY transactiondate DESC
-                    ) AS temp
-                JOIN predictions_2017 as p ON p.parcelid = temp.parcelid AND p.transactiondate = temp.transactiondate
-            ) AS p_2017
-        JOIN properties_2017 USING(parcelid)
-        LEFT JOIN airconditioningtype USING(airconditioningtypeid)
-        LEFT JOIN architecturalstyletype USING (architecturalstyletypeid)
-        LEFT JOIN buildingclasstype USING (buildingclasstypeid)
-        LEFT JOIN heatingorsystemtype USING (heatingorsystemtypeid)
-        LEFT JOIN propertylandusetype USING (propertylandusetypeid)
-        LEFT JOIN storytype USING (storytypeid)
-        LEFT JOIN typeconstructiontype USING (typeconstructiontypeid)
+    SELECT *
+    FROM (
+            SELECT temp.parcelid as parcelid, p.logerror as logerror, temp.transactiondate as transactiondate
+            FROM (
+                SELECT parcelid, MAX(transactiondate) as transactiondate
+                FROM predictions_2017
+                WHERE (transactiondate >= '2017-01-01') and (transactiondate < '2018-01-01')
+                GROUP BY parcelid
+                ORDER BY transactiondate DESC
+                ) AS temp
+            JOIN predictions_2017 as p ON p.parcelid = temp.parcelid AND p.transactiondate = temp.transactiondate
+        ) AS p_2017
+    JOIN properties_2017 USING(parcelid)
+    LEFT JOIN airconditioningtype USING(airconditioningtypeid)
+    LEFT JOIN architecturalstyletype USING (architecturalstyletypeid)
+    LEFT JOIN buildingclasstype USING (buildingclasstypeid)
+    LEFT JOIN heatingorsystemtype USING (heatingorsystemtypeid)
+    LEFT JOIN propertylandusetype USING (propertylandusetypeid)
+    LEFT JOIN storytype USING (storytypeid)
+    LEFT JOIN typeconstructiontype USING (typeconstructiontypeid)
                     """
                     , filename="zillow.csv"):
     
@@ -88,14 +86,13 @@ def get_zillow_data(sql_query= """
       - return that df
     """
     if os.path.isfile(filename):
-        df = pd.read_csv(filename)
+        df = pd.read_csv(filename, low_memory=False)
         print ("csv file found and read")
         return df
     else:
         url = get_db_url('zillow')
         
-        # This is the hard-coding to replace the %s and ensure '%2017%' is in the query
-        df = pd.read_sql(sql_query, url, params=['2017%'])
+        df = pd.read_sql(sql_query, url)
         df.to_csv(filename, index=False)
         print ("csv file not found, data read from sql query, csv created")
         return df
@@ -119,7 +116,7 @@ def nulls_by_col(df):
     return  cols_missing
 
 # generic function to return nulls by row (copied from Amanda)
-def nulls_by_row(df, index_id = 'customer_id'):
+def nulls_by_row(df):
     """
     """
     num_missing = df.isnull().sum(axis=1)
@@ -127,9 +124,9 @@ def nulls_by_row(df, index_id = 'customer_id'):
     
     rows_missing = pd.DataFrame({'num_cols_missing': num_missing, 'percent_cols_missing': pct_miss})
 
-    rows_missing = df.merge(rows_missing,
-                        left_index=True,
-                        right_index=True).reset_index()[[index_id, 'num_cols_missing', 'percent_cols_missing']]
+    # rows_missing = df.merge(rows_missing,
+    #                     left_index=True,
+    #                     right_index=True).reset_index()[['num_cols_missing', 'percent_cols_missing']]
     
     return rows_missing.sort_values(by='num_cols_missing', ascending=False)
 
@@ -208,12 +205,12 @@ DataFrame value counts:
 {df[col].value_counts()}
     _______________________________________""")                   
         
-    fig, axes = plt.subplots(1, len(get_numeric_cols(df)), figsize=(15, 5))
+    # fig, axes = plt.subplots(1, len(get_numeric_cols(df)), figsize=(15, 5))
     
-    for i, col in enumerate(w.get_numeric_cols(df)):
-        sns.histplot(df[col], ax = axes[i])
-        axes[i].set_title(f'Histogram of {col}')
-    plt.show()
+    for i, col in enumerate(get_numeric_cols(df)):
+        sns.histplot(df[col]) # , ax = axes[i])
+        plt.title(f'Histogram of {col}') # axes[i].set_title(f'Histogram of {col}')
+        plt.show()
 
 # defining overall function to acquire and clean up zillow data
 def wrangle_zillow():
