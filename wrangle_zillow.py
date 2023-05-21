@@ -212,71 +212,39 @@ DataFrame value counts:
         plt.title(f'Histogram of {col}') # axes[i].set_title(f'Histogram of {col}')
         plt.show()
 
-# defining overall function to acquire and clean up zillow data
-def wrangle_zillow():
+# This function will remove rows containing outliers in any of the outlier_columns based on 
+# being too far below Q1 or above Q3
+def remove_outliers(df, outlier_columns, IQR_mult = 1.5):
     """
-    This function will acquire and prep specific column data from zillow database. 
-    Specifically it will:
-    - 1. get data from database
-    - 2. rename the columns to something more useful
-    - 3. change has_pool nulls to 0
-    - 3. drop the remaining nulls
-    - 4. change the datatype to int for all numeric columns except bathrooms
-    - 5. drop outliers (property_value > $1.5M and lotsize_sqft > 60000
-    
-    - returns a df that looks like this:
-        - property_value - int (property_value is the target)
-        - bathrooms - float
-        - bedrooms - int
-        - has_pool - int (0 or 1)
-        - squarefeet - int
-        - year - int
-        - county - string
-        - dummy columns for later modeling
-            - county_Orange - int
-            - county_Ventura - int
+    This function will remove rows with outliers in any of the outlier_columns:
+    - accept a dataframe with multiple columns and column types
+    - accept a list of columns to check for outliers; all columns in outlier_columns should be numeric
+    - accept an IQR multiplier (default value 3); 
+        - all rows containing a value in one of the numeric columns that is (< (Q1 - 1.5*IQR)) or (> (Q3 + 1.5*IQR)) will be removed
     """
-    # first get the data from csv or sql
-    df = get_zillow_data()
     
-    #rename columns to something less unwieldy
-    df.columns = ['parcelid', 'bathrooms', 'bedrooms', 'has_pool', 'squarefeet', 'lotsize_sqft', 'year'
-                  , 'county', 'cityid', 'zip', 'lat', 'long', 'rawcensus', 'censustract_block', 'property_value']
+    # make new dataframe with just the outlier columns
+    outlier_df = df[outlier_columns]
     
-    # has_pool has many nulls; I am making the assumption these properties do not have pools
-    df.has_pool = df.has_pool.fillna(0)
+    # make a dataframe with the other columns to merge back in later
+    non_out_cols = [col for col in df.columns if col not in outlier_columns]
+    non_outlier_df = df[non_out_cols]
     
-    # decided to drop the rest of the nulls since it was < 3% of data
-    df = df.dropna()
+    # calculate Q1, Q3, IQR
+    Q1 = outlier_df.quantile(0.25)
+    Q3 = outlier_df.quantile(0.75)
+    IQR = Q3 - Q1
     
-    # most numeric columns can/should be integers; exception was bathrooms which I left as a float
-    intcolumns = ['bedrooms', 'has_pool', 'squarefeet', 'lotsize_sqft', 'year', 'county'
-                  , 'cityid', 'zip', 'censustract_block', 'property_value']
-    for col in intcolumns:
-        df[col] = df[col].astype(int)
+    # remove rows from the outlier_df that are too far outside the IQR
+    outlier_df_out = outlier_df[ ~ ((outlier_df < (Q1 - IQR_mult * IQR)) | (outlier_df > (Q3 + IQR_mult * IQR))).any(axis=1)]
     
-    # county really should be a categorical, since it represents a county in California
-    df.county = df.county.map({6037: 'LA', 6059: 'Orange', 6111: 'Ventura'})
-
-    # if these are even useful, they will be useful in the format degrees.decimal_degrees
-    df.lat = df.lat / 1_000_000
-    df.long = df.long / 1_000_000
+    # merge df's back together keeping only the rows in the outlier_df_out
+    return_df  = outlier_df_out.merge(non_outlier_df, how='inner', left_index=True, right_index=True)
     
-    # for now, I will keep only these columns. Maybe the others will have use later
-    keep = ['property_value', 'bathrooms', 'bedrooms', 'has_pool', 'squarefeet', 'lotsize_sqft', 'year', 'county']
-    df = df[keep]
+    print (f'Incoming dataframe to remove_outliers had {df.shape[0]} rows.')
+    print (f'Returned dataframe from remove_outliers has {return_df.shape[0]} rows.')
     
-    # After univariate visualization, I want to purge a few outliers
-    # in total, 4371 rows were cut out of 52320; ~8.4% of the data
-    df = df[df.property_value <= 1_500_000]
-    df = df[df.lotsize_sqft <= 60_000]
-    
-    # make dummy columns for the categorical column, 'county'
-    dummy_df = pd.get_dummies(df[['county']], drop_first=True)
-    df = pd.concat([df, dummy_df], axis=1)
-    
-    return df
-
+    return return_df
 
 # generic function to deal with missing values (nulls) in a more systematic way
 def handle_missing_values(df, prop_required_columns=0.5, prop_required_rows=0.75):
@@ -315,6 +283,149 @@ def data_prep(df, col_to_remove=[], prop_required_columns=0.5, prop_required_row
     """
     df = df.drop(columns=cols_to_remove)
     df = handle_missing_values(df, prop_required_columns, prop_required_rows)
+    return df
+
+###### defining overall function to acquire and clean up zillow data
+def wrangle_zillow():
+    """
+    This function will acquire and prep specific column data from zillow database. 
+    Specifically it will:
+    - 1. get data from database or csv if cached
+    - 2. check for duplicate rows
+    - 3. drop nulls in latitude and longitude columns if any
+    - 4. drop all rows that aren't 'Single Family Residential'
+    - 5. fill nulls in taxdelinquencyyear, poolcnt, hashottuborspa with 0
+    - 6. fill nulls in airconditioningdesc with None
+    - 7. fill nulls in heatingorsystemdesc with Other
+    - 8. make a month_sold column from transactiondate
+    - 9. make a has_halfbath column: 1 if bathrooms are x.5, 0 if bathrooms are x.0
+    -10. remove columns with more than 60% missing values or rows with > 75% missing values
+    -11. drop several remaining columns that are unhelpful or repeated information
+    -12. drop remaining rows with nulls except for the column, buildingqualitytypeid (will impute later)
+    -13. remove rows with bedrooms or bathrooms < 1
+    -14. rename the columns to something more useful
+    -15. 'fips' becomes 'county' with 3 values (LA, Orange, Ventura)
+    -16. change the datatype to int where appropriate
+    -17. drop outliers (using IQR and testing if too far below Q1 or above Q3)
+    
+    - returns a df that looks like this:
+        - property_value - int (property_value is the target)
+        - 20 other columns describing the property
+        - dummy columns
+    """
+    # first get the data from csv or sql
+    df = get_zillow_data()
+    
+    # check for duplicate rows
+    if df.duplicated().sum() != 0: 
+        print('Found duplicated rows. Check SQL query')
+        return
+    
+    # check for and drop rows with nulls in latitude or longitude
+    df = df.loc[~(df.latitude.isnull())]
+    df = df.loc[~(df.longitude.isnull())]
+    
+    # Remove any properties that are not single unit properties; 
+    df = df[df.propertylandusedesc=='Single Family Residential']
+    
+    # replace null values with 0 in taxdelinquencyyear
+    df.taxdelinquencyyear = df.taxdelinquencyyear.fillna(0)
+    
+    # made an assumption that if poolcnt was null, it should be 0 (no pool)
+    df.poolcnt = df.poolcnt.fillna(0)
+    
+    # made an assumption that if hashottubeorspa was null, it should be 0 (no hottub)
+    df.hashottuborspa = df.hashottuborspa.fillna(0)
+    
+    # some google searching said less than half of homes in Los Angeles have air conditioning. 
+    # So, I'm replacing the nulls with None. Since Wall Unit is only 16 rows, I'm changing those to 'Yes'
+    df.airconditioningdesc = df.airconditioningdesc.fillna('None')
+    df.airconditioningdesc = df.airconditioningdesc.map({'None': 'None', 'Central': 'Central'
+                                                         , 'Yes': 'Yes', 'Wall Unit': 'Yes'})
+
+    # heatingorsystemdesc has a good amount of non-nulls, so I'm just going to add an "Other" entry for the nulls
+    df.heatingorsystemdesc = df.heatingorsystemdesc.fillna('Other')
+    
+    # transactiondate is a string like '2017-01-01'; 
+    # I am binning all these value into the month, i.e. a value 1-12
+    df['month_sold'] = df.transactiondate.str[5:7].astype(int)
+    
+    # Drop columns/rows that had more than 60% nulls in the column or 75% nulls in the row
+    df = handle_missing_values(df, .6, .75)
+    
+    # Drop any remain columns that won't help, i.e. the 'id' columns and a few others listed here:
+    drop_cols = ['propertylandusetypeid', 'heatingorsystemtypeid', 'parcelid', 'id', 'propertycountylandusecode'
+                 , 'propertyzoningdesc', 'rawcensustractandblock', 'structuretaxvaluedollarcnt', 'assessmentyear'
+                 , 'landtaxvaluedollarcnt', 'taxamount', 'finishedsquarefeet12', 'calculatedbathnbr'
+                 , 'fullbathcnt', 'unitcnt', 'propertylandusedesc', 'regionidcounty', 'censustractandblock'
+                 , 'transactiondate']
+    df = df.drop(columns=drop_cols)
+    
+    # for buildingqualitytypeid, there are enough non-nulls, I will keep it, but I'll need to impute 
+    # it after train/val/test split
+    # For the rest, I want to remove the rows that have null values as there won't be that many
+    df = df.dropna(subset=df.columns.difference(['buildingqualitytypeid']))
+    
+    # outliers: 1. remove any rows with bathroomcnt < 1
+    df = df[df.bathroomcnt >= 1]
+    
+    # outliers: 2. remove any rows with bedroomcnt < 1
+    df = df[df.bedroomcnt >= 1]
+    
+    # feature engineering: make a has_halfbath
+    # and since it is related to bathroomcnt, make bathroomcnt an integer 
+    #   i.e. 3.5 becomes 3, with has_halfbath = 1 (True)
+    df['has_halfbath'] = ((df.bathroomcnt % 1) == .5)
+    df.has_halfbath = df.has_halfbath.astype(int)
+    df.bathroomcnt = df.bathroomcnt.astype(int)
+
+    # change the column names to something more meaningful and easier to use
+    columns = ['logerror', 'bathrooms', 'bedrooms', 'bldg_quality_score', 'square_feet'
+               , 'county', 'has_hottub', 'lat', 'long', 'lot_size_sqft'
+               , 'has_pool', 'city_id', 'zip_code', 'rooms', 'year_built'
+               , 'property_value', 'years_tax_delinquent'
+               , 'ac_type', 'heating_type', 'month_sold', 'has_halfbath']
+    df.columns = columns
+    
+    # change county (formerly fips) to map to the correct county
+    df.county = df.county.map({6037: 'LA', 6059: 'Orange', 6111: 'Ventura'})
+    
+    # change lat/long to the format degrees.decimal_degrees
+    df.lat = df.lat / 1_000_000
+    df.long = df.long / 1_000_000
+    
+    # outliers 2a. one stray zip code that didn't make any sense
+    df = df[df.zip_code <= 99999]
+    
+    # outliers 2b. one value for years_tax_delinquent that was way out
+    df = df[df.years_tax_delinquent < 20]
+    
+    # fill nulls with -1 for imputing later
+    df.bldg_quality_score = df.bldg_quality_score.fillna(-1)
+    
+    # change many float columns to ints
+    intcolumns = ['bedrooms', 'square_feet', 'has_hottub', 'lot_size_sqft'
+                  , 'has_pool', 'city_id', 'zip_code', 'rooms', 'year_built', 'property_value'
+                  , 'years_tax_delinquent']
+    df[intcolumns] = df[intcolumns].astype(int)
+    
+    # outliers: 3. remove rows with values outside of 1.5*IQR above Q3 or below Q1 in these columns
+    outlier_columns = ['bathrooms', 'bedrooms', 'square_feet', 'lot_size_sqft', 'property_value']
+    df = remove_outliers(df, outlier_columns)
+    
+    # reorder the columns
+    ordered_columns = ['property_value', 'logerror', 'square_feet', 'lot_size_sqft', 'bathrooms'
+                   , 'has_halfbath', 'bedrooms', 'rooms', 'has_hottub', 'has_pool', 'ac_type'
+                   , 'heating_type', 'month_sold', 'year_built'
+                   , 'years_tax_delinquent', 'bldg_quality_score', 'lat', 'long', 'county', 'city_id'
+                   , 'zip_code']
+    df = df[ordered_columns]
+        
+    # make dummy columns for one categorical column, 'county'
+    # city_id and zip_code may need dummies as well, but there are a lot of them
+    dummy_df = pd.get_dummies(df[['county']], drop_first=True)
+    df = pd.concat([df, dummy_df], axis=1)
+    
     return df
 
 

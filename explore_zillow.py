@@ -13,8 +13,31 @@ from scipy.stats import pearsonr, spearmanr, f_oneway, ttest_ind
 from sklearn.feature_selection import SelectKBest, f_regression, RFE
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler, QuantileTransformer
+from sklearn.impute import SimpleImputer
 
 # FUNCTIONS
+# defining a function to impute values for any columns that need it
+def impute_columns(train, validate, test, cols_to_impute=['bldg_quality_score']
+                   , col_missing_values = [-1], strategy='mean'):
+    """
+    This function will 
+    - make and fit a SimpleImputer on train on the columns/missing values given with strategy='mean'
+    - use it to impute the values on train/validate/test 
+    - return train/validate/test
+    """
+    
+    for n, col in enumerate(cols_to_impute):
+        # make and fit the thing
+        imputer = SimpleImputer(missing_values = col_missing_values[n], strategy=strategy)
+        imputer = imputer.fit(train[[col]])
+        
+        # use the thing
+        train[[col]] = imputer.transform(train[[col]])
+        validate[[col]] = imputer.transform(validate[[col]])
+        test[[col]] = imputer.transform(test[[col]])
+        
+    return train, validate, test
+
 #defining a function for the final_report notebook to print out a nice visual of the target: property_value
 def get_target_plot (df, target='property_value'):
     """
